@@ -1,4 +1,4 @@
-# computer_vision
+# Neural Networks From Scratch
 
 ##### Computer visions projects, from tutorials to read world use cases. 
 
