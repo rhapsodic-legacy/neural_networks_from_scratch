@@ -1,0 +1,495 @@
+# Building a Transformer Model from Scratch for Language Modeling
+
+This walkthrough is designed for coders to understand the inner workings of a Transformer model by building one from scratch in Python using PyTorch. The goal is to demystify the components of a Transformer, show how it processes data, and evaluate its performance, all while using a lightweight dataset suitable for limited hardware like Google Colab.
+
+---
+
+## 1. Why the WikiText-2 Dataset?
+
+### Rationale
+
+The **WikiText-2** dataset, specifically the `wikitext-2-raw-v1` variant, is chosen for several reasons:
+
+- **Lightweight Size**: WikiText-2 contains ~2 million tokens (~4 MB compressed), making it small enough to fit in Google Colab's memory (typically 12–16 GB RAM, 16 GB GPU VRAM on a T4)
+- **Rich Content**: Derived from Wikipedia articles, it offers diverse, high-quality text covering various topics
+- **Standard Benchmark**: Widely used in Transformer research, enabling comparisons with published results
+- **Accessibility**: Available via the Hugging Face `datasets` library
+- **Suitability for Language Modeling**: Preprocessed for next-token prediction, aligning with autoregressive tasks
+
+### Hardware Considerations
+
+- **Colab Compatibility**: Training a small Transformer (6 layers, 256 hidden size) on WikiText-2 for 3–10 epochs takes ~1–4 hours on Colab's T4 GPU
+- **Low Resource Demand**: The dataset's size ensures preprocessing and training don't exhaust disk space or RAM
+- **Scalability**: Complex enough to demonstrate Transformer dynamics while remaining educational
+
+---
+
+## 2. Data Preprocessing
+
+The preprocessing step prepares the WikiText-2 dataset for training by converting raw text into tokenized sequences.
+
+```python
+from datasets import load_dataset
+from collections import Counter
+from torch.utils.data import Dataset, DataLoader
+import torch
+
+# Load dataset
+ds = load_dataset("wikitext", "wikitext-2-raw-v1")
+```
+
+**Loading**: Uses Hugging Face's datasets library to fetch WikiText-2, which includes train, validation, and test splits.
+
+```python
+# Build vocabulary from training set
+train_text = " ".join([text for text in ds["train"]["text"] if text.strip() != ""])
+words = train_text.split()
+word_freq = Counter(words)
+vocab_size = 10000
+vocab = ["<PAD>", "<UNK>"] + [word for word, _ in word_freq.most_common(vocab_size - 2)]
+word_to_index = {word: idx for idx, word in enumerate(vocab)}
+
+pad_token_id = word_to_index["<PAD>"]
+unk_token_id = word_to_index["<UNK>"]
+```
+
+**Vocabulary Creation**:
+- Concatenates all non-empty training texts and splits into words
+- Uses Counter to count word frequencies and selects the top 9,998 words
+- Adds `<PAD>` (for padding) and `<UNK>` (for unknown words) special tokens
+- Creates a 10,000-token vocabulary with word-to-index mapping
+
+```python
+# Tokenization function
+def tokenize(text):
+    return [word_to_index.get(word, unk_token_id) for word in text.split()]
+
+# Preprocess a dataset split into sequences
+def preprocess_split(split):
+    tokenized = [tokenize(text) for text in split["text"] if text.strip() != ""]
+    all_tokens = [token for seq in tokenized for token in seq]
+    seq_len = 128
+    sequences = [all_tokens[i:i + seq_len] for i in range(0, len(all_tokens), seq_len)]
+    # Pad the last sequence
+    if len(sequences[-1]) < seq_len:
+        sequences[-1] += [pad_token_id] * (seq_len - len(sequences[-1]))
+    return sequences
+```
+
+**Sequence Creation**:
+- Tokenizes each text, flattening all tokens into a single list
+- Chunks tokens into fixed-length sequences of 128 tokens
+- Pads the final sequence to ensure uniform length
+
+```python
+# Process all splits
+train_sequences = preprocess_split(ds["train"])
+val_sequences = preprocess_split(ds["validation"])
+test_sequences = preprocess_split(ds["test"])
+
+# Custom dataset class
+class WikiTextDataset(Dataset):
+    def __init__(self, sequences):
+        self.sequences = sequences
+
+    def __len__(self):
+        return len(self.sequences)
+
+    def __getitem__(self, idx):
+        return torch.tensor(self.sequences[idx], dtype=torch.long)
+
+# Create data loaders
+batch_size = 32
+train_dataset = WikiTextDataset(train_sequences)
+val_dataset = WikiTextDataset(val_sequences)
+test_dataset = WikiTextDataset(test_sequences)
+
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=batch_size)
+test_loader = DataLoader(test_dataset, batch_size=batch_size)
+```
+
+**Data Loaders**: Create PyTorch DataLoader objects to batch sequences (32 per batch), shuffle training data, and load validation/test data sequentially.
+
+---
+
+## 3. The Transformer Model
+
+The Transformer is a decoder-only architecture designed for language modeling, predicting the next token in a sequence.
+
+```python
+import torch
+import torch.nn as nn
+import math
+
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, max_seq_len):
+        super().__init__()
+        pe = torch.zeros(max_seq_len, d_model)
+        position = torch.arange(0, max_seq_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        x = x + self.pe[:, :x.size(1)]
+        return x
+```
+
+**Purpose**: Adds positional information to token embeddings using sinusoidal functions, as Transformers lack inherent sequence order awareness.
+
+```python
+class MultiHeadAttention(nn.Module):
+    def __init__(self, d_model, num_heads, dropout):
+        super().__init__()
+        assert d_model % num_heads == 0
+        self.num_heads = num_heads
+        self.d_k = d_model // num_heads
+        self.WQ = nn.Linear(d_model, d_model)
+        self.WK = nn.Linear(d_model, d_model)
+        self.WV = nn.Linear(d_model, d_model)
+        self.WO = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, X, mask):
+        batch_size, seq_len, _ = X.size()
+        Q = self.WQ(X).view(batch_size, seq_len, self.num_heads, self.d_k).transpose(1, 2)
+        K = self.WK(X).view(batch_size, seq_len, self.num_heads, self.d_k).transpose(1, 2)
+        V = self.WV(X).view(batch_size, seq_len, self.num_heads, self.d_k).transpose(1, 2)
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
+        scores = scores + mask
+        weights = torch.nn.functional.softmax(scores, dim=-1)
+        weights = self.dropout(weights)
+        output = torch.matmul(weights, V)
+        output = output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
+        output = self.WO(output)
+        return output
+```
+
+**Purpose**: Implements self-attention, allowing the model to weigh the importance of different tokens in the sequence.
+
+**Mechanism**:
+- Splits input into multiple attention heads
+- Computes query (Q), key (K), and value (V) projections
+- Calculates attention scores and applies masking
+- Outputs weighted values concatenated across heads
+
+```python
+class FeedForward(nn.Module):
+    def __init__(self, d_model, d_ff, dropout):
+        super().__init__()
+        self.linear1 = nn.Linear(d_model, d_ff)
+        self.linear2 = nn.Linear(d_ff, d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        x = torch.nn.functional.relu(self.linear1(x))
+        x = self.dropout(x)
+        x = self.linear2(x)
+        return x
+```
+
+**Purpose**: Applies a position-wise feed-forward network with ReLU activation and dropout.
+
+```python
+class TransformerLayer(nn.Module):
+    def __init__(self, d_model, num_heads, d_ff, dropout):
+        super().__init__()
+        self.attention = MultiHeadAttention(d_model, num_heads, dropout)
+        self.ffn = FeedForward(d_model, d_ff, dropout)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x, mask):
+        attn_input = self.norm1(x)
+        attn_output = self.attention(attn_input, mask)
+        x = x + self.dropout(attn_output)
+        ffn_input = self.norm2(x)
+        ffn_output = self.ffn(ffn_input)
+        x = x + self.dropout(ffn_output)
+        return x
+```
+
+**Purpose**: Combines attention and feed-forward components with pre-layer normalization and residual connections.
+
+```python
+class Transformer(nn.Module):
+    def __init__(self, vocab_size, d_model, num_layers, num_heads, d_ff, max_seq_len, dropout):
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size, d_model)
+        self.pos_encoding = PositionalEncoding(d_model, max_seq_len)
+        self.layers = nn.ModuleList([TransformerLayer(d_model, num_heads, d_ff, dropout) for _ in range(num_layers)])
+        self.norm = nn.LayerNorm(d_model)
+        self.output_layer = nn.Linear(d_model, vocab_size)
+        self.output_layer.weight = self.embedding.weight  # Weight tying
+        self.pad_token_id = 0
+
+    def forward(self, input_ids):
+        batch_size, seq_len = input_ids.size()
+        causal_mask = torch.triu(torch.ones((seq_len, seq_len), device=input_ids.device), diagonal=1).bool()
+        padding_mask = (input_ids == self.pad_token_id)
+        full_mask = causal_mask[None, None, :, :] | padding_mask[:, None, None, :]
+        full_mask = full_mask.float() * -1e9
+        x = self.embedding(input_ids)
+        x = self.pos_encoding(x)
+        for layer in self.layers:
+            x = layer(x, full_mask)
+        x = self.norm(x)
+        logits = self.output_layer(x)
+        return logits
+```
+
+**Purpose**: Assembles the full Transformer model with embedding, positional encoding, multiple layers, and output projection.
+
+---
+
+## 4. Training Setup
+
+```python
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = Transformer(
+    vocab_size=10000,
+    d_model=256,
+    num_layers=6,
+    num_heads=8,
+    d_ff=1024,
+    max_seq_len=128,
+    dropout=0.1
+).to(device)
+
+optimizer = torch.optim.Adam(model.parameters(), lr=3e-4)
+```
+
+**Initialization**: Creates a model with ~10–20M parameters, suitable for Colab's T4 GPU.
+
+**Hyperparameters**:
+- `d_model=256`: Embedding size
+- `num_layers=6`: Number of Transformer layers
+- `num_heads=8`: Attention heads
+- `d_ff=1024`: Feed-forward hidden size
+- `max_seq_len=128`: Maximum sequence length
+- `dropout=0.1`: Dropout rate
+
+```python
+# Training loop
+for epoch in range(3):
+    model.train()
+    total_loss = 0
+    for batch in train_loader:
+        input_ids = batch.to(device)
+        optimizer.zero_grad()
+        logits = model(input_ids)
+        targets = input_ids[:, 1:]
+        logits = logits[:, :-1, :]
+        mask = (targets != pad_token_id)
+        loss = torch.nn.functional.cross_entropy(
+            logits.contiguous().view(-1, vocab_size),
+            targets.contiguous().view(-1),
+            reduction='none'
+        )
+        loss = (loss * mask.view(-1)).sum() / mask.sum()
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item()
+    avg_train_loss = total_loss / len(train_loader)
+    print(f"Epoch {epoch + 1}, Training Loss: {avg_train_loss:.4f}")
+```
+
+**Purpose**: Trains the model to predict the next token by minimizing cross-entropy loss with proper masking for padding tokens.
+
+---
+
+## 5. Quantitative Evaluation
+
+```python
+import math
+
+model.eval()
+test_loss = 0
+with torch.no_grad():
+    for batch in test_loader:
+        input_ids = batch.to(device)
+        logits = model(input_ids)
+        targets = input_ids[:, 1:]
+        logits = logits[:, :-1, :]
+        mask = (targets != pad_token_id)
+        loss = torch.nn.functional.cross_entropy(
+            logits.contiguous().view(-1, vocab_size),
+            targets.contiguous().view(-1),
+            reduction='none'
+        )
+        loss = (loss * mask.view(-1)).sum() / mask.sum()
+        test_loss += loss.item()
+
+avg_test_loss = test_loss / len(test_loader)
+perplexity = math.exp(avg_test_loss)
+print(f"Test Loss: {avg_test_loss:.4f}, Test Perplexity: {perplexity:.4f}")
+```
+
+**Purpose**: Measures generalization to unseen data using cross-entropy loss and perplexity.
+
+---
+
+## 6. Qualitative Evaluation
+
+```python
+index_to_word = {idx: word for word, idx in word_to_index.items()}
+
+def generate_text(model, prompt_ids, max_length=50, sampling="greedy", top_k=50, top_p=0.9):
+    model.eval()
+    if isinstance(prompt_ids, list):
+        input_ids = torch.tensor([prompt_ids], dtype=torch.long).to(device)
+    else:
+        input_ids = prompt_ids.clone().detach().unsqueeze(0).to(device)
+    generated = input_ids.tolist()[0]
+    
+    with torch.no_grad():
+        for _ in range(max_length):
+            logits = model(input_ids)
+            next_logits = logits[:, -1, :]
+            
+            if sampling == "greedy":
+                next_token = torch.argmax(next_logits, dim=-1)
+            elif sampling == "top_k":
+                top_k_probs, top_k_indices = torch.topk(next_logits, top_k, dim=-1)
+                probs = torch.nn.functional.softmax(top_k_probs, dim=-1)
+                next_token = top_k_indices[0, torch.multinomial(probs, 1)]
+            elif sampling == "top_p":
+                sorted_logits, sorted_indices = torch.sort(next_logits, descending=True, dim=-1)
+                sorted_probs = torch.nn.functional.softmax(sorted_logits, dim=-1)
+                cum_probs = torch.cumsum(sorted_probs, dim=-1)
+                sorted_indices_to_keep = cum_probs <= top_p
+                sorted_indices_to_keep[..., 0] = True
+                truncated_probs = sorted_probs * sorted_indices_to_keep
+                truncated_probs = truncated_probs / truncated_probs.sum(dim=-1, keepdim=True)
+                next_token = sorted_indices[0, torch.multinomial(truncated_probs, 1)]
+            
+            next_token_id = next_token.item()
+            generated.append(next_token_id)
+            input_ids = torch.tensor([generated], dtype=torch.long).to(device)
+            
+            if next_token_id == pad_token_id:
+                break
+    
+    return generated
+
+# Test text generation
+prompts = ["The history of", "Once upon a time", "In the year 2025"]
+for prompt_text in prompts:
+    print(f"\nPrompt: {prompt_text}")
+    prompt_ids = tokenize(prompt_text)[:128]
+    for sampling in ["greedy", "top_k", "top_p"]:
+        generated_ids = generate_text(model, prompt_ids, max_length=50, sampling=sampling, top_k=50, top_p=0.9)
+        generated_text = " ".join([index_to_word.get(id, "<UNK>") for id in generated_ids])
+        print(f"Generated Text ({sampling}): {generated_text}")
+```
+
+**Purpose**: Generates text using different sampling strategies (greedy, top-k, top-p) to evaluate language generation capabilities.
+
+---
+
+## 7. Improvement Strategies
+
+### Extend Training
+```python
+best_val_loss = float('inf')
+for epoch in range(20):
+    # Training loop (as above)
+    # Validation
+    val_loss = 0
+    with torch.no_grad():
+        for batch in val_loader:
+            # Compute loss (as in test evaluation)
+            val_loss += loss.item()
+    avg_val_loss = val_loss / len(val_loader)
+    if avg_val_loss < best_val_loss:
+        best_val_loss = avg_val_loss
+        torch.save(model.state_dict(), "best_model.pt")
+```
+
+### Use Subword Tokenization
+```python
+from tokenizers import Tokenizer
+from tokenizers.models import BPE
+
+tokenizer = Tokenizer(BPE())
+tokenizer.train_from_iterator(ds["train"]["text"], vocab_size=30000)
+```
+
+### Advanced Sampling with Temperature
+```python
+def generate_with_temperature(logits, temperature=0.7):
+    next_logits = logits[:, -1, :] / temperature
+    return torch.multinomial(torch.softmax(next_logits, dim=-1), 1)
+```
+
+### Learning Rate Scheduling
+```python
+scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=20)
+scheduler.step()  # After each epoch
+```
+
+### Mixed Precision Training
+```python
+from torch.cuda.amp import autocast, GradScaler
+
+scaler = GradScaler()
+with autocast():
+    logits = model(input_ids)
+    loss = # ... compute loss
+scaler.scale(loss).backward()
+scaler.step(optimizer)
+scaler.update()
+```
+
+---
+
+## 8. Modern Deep Learning Evolution
+
+This implementation, while educational, represents the foundational approach to Transformers. Modern deep learning has dramatically simplified these workflows. Compare our implementation to modern approaches:
+
+### Our Implementation (~200 lines)
+- Manual vocabulary building
+- Custom tokenization
+- From-scratch attention mechanism
+- Manual training loops
+- Limited performance
+
+### Modern Approach (~5 lines)
+```python
+from transformers import GPT2LMHeadModel, GPT2Tokenizer
+
+model = GPT2LMHeadModel.from_pretrained("gpt2")
+tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+inputs = tokenizer("The history of", return_tensors="pt")
+outputs = model.generate(**inputs, max_length=50)
+print(tokenizer.decode(outputs[0]))
+```
+
+### Why Modern Approaches Work Better
+
+- **Pretrained Models**: Models like GPT-2, LLaMA, or newer variants are trained on massive datasets with billions of parameters
+- **Optimized Libraries**: Abstract away complexity with highly optimized implementations
+- **Cloud APIs**: Reduce the need for manual implementation and local resources
+- **Fine-tuning Tools**: Enable customization without building from scratch
+
+### Educational Value
+
+Building from scratch teaches:
+- The mechanics of attention mechanisms
+- Understanding of embeddings and positional encoding
+- Training dynamics and optimization challenges
+- Appreciation for what modern libraries abstract away
+
+This walkthrough bridges foundational knowledge with practical application, helping students understand both the complexity of Transformers and the power of modern tools.
+
+---
+
+## Conclusion
+
+This walkthrough demonstrates how to build a complete Transformer model from scratch, covering every aspect from data preprocessing to evaluation. While the implementation is basic compared to modern standards, it provides invaluable insights into the inner workings of these powerful models that have revolutionized natural language processing.
+
+The contrast between our manual implementation and modern high-level APIs illustrates how rapidly the field has evolved, making sophisticated NLP capabilities accessible to a broader audience while maintaining the importance of understanding the underlying principles.
