@@ -14,7 +14,7 @@ This repository exists to provide an educational resource for university graduat
 
 ## License    
        
-MIT License   
+MIT License    
  
 Copyright (c) 2025 Rhapsodic Legacy
 
