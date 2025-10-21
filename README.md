@@ -9,7 +9,7 @@ This repository contains the following:
   - `walkthrough.txt`: A detailed Markdown walkthrough explaining the dataset choice, preprocessing, Transformer architecture, quantitative and qualitative evaluation, and improvement strategies. Intended for graduate-level coders learning Transformer mechanics.   
    
 ## Overview            
-    
+     
 This repository exists to provide an educational resource for university graduate-level coders to understand how Transformer models work by building one from scratch in Python using PyTorch. Unlike modern workflows that rely on high-level libraries like Hugging Face's `transformers`, this project demystifies the core components of a decoder-only Transformer (similar to early GPT models) for language modeling. It uses the lightweight `wikitext-2-raw-v1` dataset, suitable for limited hardware like Google Colab, to demonstrate data preprocessing, model implementation, and evaluation. The walkthrough and notebook serve as a hands-on guide to bridge foundational knowledge with practical application, highlighting the evolution of deep learning from manual implementations to simplified library-based solutions. 
 
 ## License      
