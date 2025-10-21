@@ -6,7 +6,7 @@ This repository contains the following:
  
 - **NNFS Folder**:
   - `NNFS.ipynb`: A Jupyter notebook implementing a Transformer model from scratch, including data preprocessing, model architecture, training, and evaluation using the WikiText-2 dataset. Designed to run in Google Colab.
-  - `walkthrough.txt`: A detailed Markdown walkthrough explaining the dataset choice, preprocessing, Transformer architecture, quantitative and qualitative evaluation, and improvement strategies. Intended for graduate-level coders learning Transformer mechanics.  
+  - `walkthrough.txt`: A detailed Markdown walkthrough explaining the dataset choice, preprocessing, Transformer architecture, quantitative and qualitative evaluation, and improvement strategies. Intended for graduate-level coders learning Transformer mechanics.   
    
 ## Overview          
     
